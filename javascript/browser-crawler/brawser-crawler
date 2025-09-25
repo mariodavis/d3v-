@@ -1,0 +1,149 @@
+(() => {
+  // =============================
+  // 📌 Website Crawler (Browser)
+  // =============================
+
+  // Utility functions
+  const utils = {
+    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+    downloadJSON: (filename, obj) => {
+      const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    normalizeUrl: (base, href) => {
+      try {
+        return new URL(href, base).href.split("#")[0];
+      } catch {
+        return null;
+      }
+    },
+  };
+
+  // Core crawler
+  async function crawlSite(opts = {}) {
+    const settings = Object.assign(
+      {
+        maxDepth: 1,
+        concurrency: 3,
+        delayBetweenRequests: 200,
+        followSitemap: true,
+        bruteForce: false,
+        wordlist: ["admin", "login", "dashboard", "api", "config", "uploads"],
+        exportResults: true,
+      },
+      opts
+    );
+
+    const origin = location.origin;
+    const visited = new Set();
+    const queue = [{ url: location.href, depth: 0 }];
+    const discovered = [];
+    const errors = [];
+    const bruteForceHits = [];
+
+    async function fetchUrl(target) {
+      if (visited.has(target.url)) return;
+      visited.add(target.url);
+
+      try {
+        const res = await fetch(target.url, { method: "GET" });
+        if (!res.ok) throw new Error(res.status);
+        const html = await res.text();
+
+        discovered.push({ url: target.url, status: res.status });
+
+        if (target.depth < settings.maxDepth) {
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          const links = [...doc.querySelectorAll("a[href]")].map((a) =>
+            utils.normalizeUrl(target.url, a.getAttribute("href"))
+          );
+
+          for (const l of links) {
+            if (l && l.startsWith(origin) && !visited.has(l)) {
+              queue.push({ url: l, depth: target.depth + 1 });
+            }
+          }
+        }
+      } catch (err) {
+        errors.push({ url: target.url, error: err.message });
+      }
+    }
+
+    while (queue.length) {
+      const batch = queue.splice(0, settings.concurrency);
+      await Promise.all(batch.map(fetchUrl));
+      if (settings.delayBetweenRequests > 0) {
+        await utils.delay(settings.delayBetweenRequests);
+      }
+    }
+
+    // Brute force step
+    if (settings.bruteForce) {
+      for (const word of settings.wordlist) {
+        const url = utils.normalizeUrl(origin, "/" + word);
+        if (!url) continue;
+        try {
+          const res = await fetch(url, { method: "HEAD" });
+          if (res.ok) {
+            bruteForceHits.push({ url, status: res.status });
+          }
+        } catch {}
+      }
+    }
+
+    // Sitemap.xml
+    if (settings.followSitemap) {
+      try {
+        const smUrl = utils.normalizeUrl(origin, "/sitemap.xml");
+        const res = await fetch(smUrl);
+        if (res.ok) {
+          const xml = await res.text();
+          const urls = [...xml.matchAll(/<loc>(.*?)<\/loc>/g)].map((m) => m[1]);
+          urls.forEach((u) => {
+            if (!visited.has(u)) {
+              discovered.push({ url: u, status: "sitemap" });
+            }
+          });
+        }
+      } catch {}
+    }
+
+    const summary = { settings, discovered, bruteForceHits, errors };
+
+    if (settings.exportResults) {
+      const filename = `site-enum-${location.hostname}-${Date.now()}.json`;
+      utils.downloadJSON(filename, summary);
+      console.log(`📥 Results exported: ${filename}`);
+    }
+
+    return summary;
+  }
+
+  // Expose globally with helpers
+  window.__siteCrawler = {
+    crawlSite,
+    utils,
+    defaults: {
+      maxDepth: 1,
+      concurrency: 3,
+      delayBetweenRequests: 200,
+      followSitemap: true,
+      bruteForce: false,
+      exportResults: true,
+    },
+    // Helpers
+    lightScan: () => crawlSite({ maxDepth: 1, concurrency: 2, exportResults: false }),
+    fullScan: () => crawlSite({ maxDepth: 2, concurrency: 3, followSitemap: true, exportResults: true }),
+    bruteScan: () => crawlSite({ maxDepth: 1, bruteForce: true, concurrency: 2 }),
+  };
+
+  console.log("✅ Site Enumerator loaded. Try:");
+  console.log("   await __siteCrawler.lightScan()");
+  console.log("   await __siteCrawler.fullScan()");
+  console.log("   await __siteCrawler.bruteScan()");
+})();
